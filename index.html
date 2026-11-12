@@ -101,8 +101,10 @@ const fmtJ=s=>{const d=parse(s);return (d.getMonth()+1)+'/'+d.getDate()+'（'+WD
 const fmtFull=s=>{const d=parse(s);return d.getFullYear()+'/'+fmtJ(s)};
 const today=()=>ymd(new Date());
 const nowIso=()=>new Date().toISOString();
-const NAME={room:'部屋の掃除',big:'大掃除'};
-const DEF_CFG={room_days:7,big_days:30,big_counts_as_room:true,updated_at:'2000-01-01T00:00:00.000Z'};
+const NAME={room:'こめちの家の掃除',big:'こめちの家の大掃除'};
+const DEF_CFG={room_days:7,big_nth:1,big_weekday:4,room_time:'',big_time:'',cal_minutes:60,big_counts_as_room:true,updated_at:'2000-01-01T00:00:00.000Z'};
+const nthWeekday=(y,m,nth,wd)=>{const f=new Date(y,m,1,12).getDay();return ymd(new Date(y,m,1+((wd-f+7)%7)+7*(nth-1),12))};
+const addMinutes=(date,time,min)=>{const [h,m]=time.split(':').map(Number);const d=parse(date);d.setHours(h,m+min,0,0);return ymd(d)+'T'+pad(d.getHours())+':'+pad(d.getMinutes())+':00'};
 
 /* ---------- データ ---------- */
 let settings=Object.assign({google_client_id:'',drive_linked:false},lsGet(LS_SET,{}));
@@ -111,40 +113,49 @@ if(!settings.google_client_id)settings.google_client_id=DEFAULT_CLIENT_ID;
 const saveSettings=()=>lsSet(LS_SET,settings);
 let db=lsGet(LS_DB,null);
 if(!db){
-  db={schema_version:1,events:{},next_override:{},config:{...DEF_CFG}};
-  db.events['seed-room']={id:'seed-room',type:'room',date:'2026-11-12',memo:'初期値',updated_at:'2026-11-12T00:00:00.000Z'};
-  db.events['seed-big']={id:'seed-big',type:'big',date:'2026-11-02',memo:'初期値',updated_at:'2026-11-12T00:00:00.000Z'};
+  db={schema_version:1,events:{},next_override:{},config:{...DEF_CFG},cal_events:{}};
+  db.events['seed-room']={id:'seed-room',type:'room',date:'2026-11-12',time:'',memo:'初期値',updated_at:'2026-11-12T00:00:00.000Z'};
+  db.events['seed-big']={id:'seed-big',type:'big',date:'2026-11-02',time:'',memo:'初期値',updated_at:'2026-11-12T00:00:00.000Z'};
+  db.cal_events.room={date:'2026-11-19',time:'',event_id:'lq0mitnj7g0gu5kn0phbf0jf84',updated_at:'2026-11-12T00:00:00.000Z'};
+  db.cal_events.big={date:'2026-12-03',time:'',event_id:'j3jv6mlnrv8qj9mg3icmnj4brk',updated_at:'2026-11-12T00:00:00.000Z'};
   lsSet(LS_DB,db);
 }
+db.config={...DEF_CFG,...db.config};db.cal_events=db.cal_events||{};
 const saveLocal=()=>lsSet(LS_DB,db);
 function changed(){saveLocal();scheduleSync();render()}
 const uid=()=>'e'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
 
 function liveEvents(){return Object.values(db.events).filter(e=>!e.deleted).sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:(a.updated_at<b.updated_at?1:-1))}
-function lastDone(kind){
+function lastEv(kind){
   const types=(kind==='room'&&db.config.big_counts_as_room)?['room','big']:[kind];
-  const ev=liveEvents().filter(e=>types.includes(e.type));
-  return ev.length?ev[0].date:null;
+  return liveEvents().find(e=>types.includes(e.type))||null;
 }
+function lastDone(kind){const e=lastEv(kind);return e?e.date:null}
+const evTime=k=>{const e=lastEv(k);return e&&e.time?' '+e.time:''};
 function nextInfo(kind){
-  const last=lastDone(kind),days=db.config[kind+'_days'];
-  const auto=last?addDays(last,days):null;
+  const c=db.config,last=lastDone(kind);
+  let auto=null;
+  if(last){if(kind==='room')auto=addDays(last,c.room_days);else{const d=parse(last);auto=nthWeekday(d.getFullYear(),d.getMonth()+1,c.big_nth,c.big_weekday)}}
   const ov=db.next_override[kind];
-  const manual=ov&&ov.date&&(!last||ov.date>last)?ov.date:null;
-  return {last,days,auto,next:manual||auto,manual:!!manual};
+  const manual=ov&&ov.date&&(!last||ov.date>last)?ov:null;
+  const next=manual?manual.date:auto;
+  return {last,auto,next,manual:!!manual,time:manual?(manual.time||''):(c[kind+'_time']||''),
+    span:last&&next?Math.max(1,diffDays(next,last)):1,
+    rule:kind==='room'?c.room_days+'日ごと':'毎月 第'+c.big_nth+WD[c.big_weekday]+'曜日'};
 }
 function clearOverrides(type){
   const kinds=type==='big'&&db.config.big_counts_as_room?['room','big']:[type];
   kinds.forEach(k=>{if(db.next_override[k]&&db.next_override[k].date)db.next_override[k]={date:null,updated_at:nowIso()}});
 }
-function addEvent(type,date,memo){
-  const id=uid();db.events[id]={id,type,date,memo:memo||'',updated_at:nowIso()};
+function addEvent(type,date,memo,time){
+  const id=uid();db.events[id]={id,type,date,time:time||'',memo:memo||'',updated_at:nowIso()};
   clearOverrides(type);changed();
 }
-function setOverride(kind,date){db.next_override[kind]={date:date||null,updated_at:nowIso()};changed()}
+function setOverride(kind,date,time){db.next_override[kind]={date:date||null,time:time||'',updated_at:nowIso()};changed()}
 
 function mergeDb(a,b){
-  const out={schema_version:1,events:{...a.events},next_override:{...a.next_override},config:a.config};
+  const out={schema_version:1,events:{...a.events},next_override:{...a.next_override},config:a.config,cal_events:{...(a.cal_events||{})}};
+  for(const [k,o] of Object.entries(b.cal_events||{})){const x=out.cal_events[k];if(!x||(o.updated_at||'')>(x.updated_at||''))out.cal_events[k]=o}
   for(const [id,e] of Object.entries(b.events||{})){const x=out.events[id];if(!x||(e.updated_at||'')>(x.updated_at||''))out.events[id]=e}
   for(const [k,o] of Object.entries(b.next_override||{})){const x=out.next_override[k];if(!x||(o.updated_at||'')>(x.updated_at||''))out.next_override[k]=o}
   if(b.config&&(b.config.updated_at||'')>(a.config.updated_at||''))out.config={...DEF_CFG,...b.config};
@@ -172,10 +183,11 @@ const G_TOKKEY='gauth_tok:'+G_REDIR;
     if(s&&s.e>Date.now()){gToken=s.t;gExp=s.e}
   }catch(e){}
 })();
-function gRedirect(prompt){
+const CAL_SCOPE='https://www.googleapis.com/auth/calendar.events';
+function gRedirect(prompt,scope){
   const st=Math.random().toString(36).slice(2)+Date.now().toString(36);
   try{sessionStorage.setItem('gauth_state',st)}catch(e){}
-  const q=new URLSearchParams({client_id:settings.google_client_id.trim(),redirect_uri:G_REDIR,response_type:'token',scope:G_SCOPE,state:st,include_granted_scopes:'true'});
+  const q=new URLSearchParams({client_id:settings.google_client_id.trim(),redirect_uri:G_REDIR,response_type:'token',scope:scope||G_SCOPE,state:st,include_granted_scopes:'true'});
   if(prompt)q.set('prompt',prompt);
   location.href='https://accounts.google.com/o/oauth2/v2/auth?'+q.toString();
   return new Promise(()=>{});
@@ -250,29 +262,66 @@ function render(){
   renderNav();const m=$('#main');
   if(ui.tab==='home')renderHome(m);else if(ui.tab==='history')renderHistory(m);else if(ui.tab==='cal')renderCal(m);else renderSettings(m);
 }
-function gcalUrl(kind,date){
-  const q=new URLSearchParams({action:'TEMPLATE',text:'ハムスターの'+NAME[kind],dates:date.replace(/-/g,'')+'/'+addDays(date,1).replace(/-/g,''),details:'ハムスター手帖から登録'});
-  return 'https://calendar.google.com/calendar/render?'+q.toString();
+/* ---------- Googleカレンダー自動登録 ---------- */
+const CAL_API='https://www.googleapis.com/calendar/v3/calendars/primary/events';
+function calBody(kind,n){
+  const base={summary:NAME[kind],description:'ハムスター手帖から登録',transparency:'transparent'};
+  if(n.time){
+    return {...base,start:{dateTime:n.next+'T'+n.time+':00',timeZone:'Asia/Tokyo',date:null},end:{dateTime:addMinutes(n.next,n.time,db.config.cal_minutes||60),timeZone:'Asia/Tokyo',date:null}};
+  }
+  return {...base,start:{date:n.next,dateTime:null,timeZone:null},end:{date:addDays(n.next,1),dateTime:null,timeZone:null}};
+}
+function calConsent(kind){
+  let last=0;try{last=+sessionStorage.getItem('gcal_try')||0}catch(e){}
+  if(Date.now()-last<120000){toast('Googleカレンダーの許可が得られませんでした。もう一度お試しください',5000);return}
+  try{sessionStorage.setItem('gcal_try',String(Date.now()));sessionStorage.setItem('pending_cal',kind)}catch(e){}
+  gRedirect('consent',G_SCOPE+' '+CAL_SCOPE);
+}
+let calBusy=false;
+async function registerCalendar(kind){
+  if(calBusy)return;
+  const n=nextInfo(kind);if(!n.next){toast('次回日がありません');return}
+  const prev=db.cal_events[kind];
+  if(prev&&prev.date===n.next&&(prev.time||'')===n.time&&prev.event_id){toast('登録済みです');return}
+  if(!gToken||Date.now()>gExp-60000){try{sessionStorage.setItem('pending_cal',kind)}catch(e){}return gRedirect('',G_SCOPE+' '+CAL_SCOPE)}
+  calBusy=true;
+  try{
+    const headers={'Content-Type':'application/json'},body=JSON.stringify(calBody(kind,n));
+    let r=null,id=prev&&prev.event_id;
+    if(id){r=await gFetch(CAL_API+'/'+id,{method:'PATCH',headers,body});if(r.status===404||r.status===410){id=null;r=null}}
+    if(!id)r=await gFetch(CAL_API,{method:'POST',headers,body});
+    if(!r.ok){
+      const t=await r.text();
+      if(r.status===401||(r.status===403&&/scope|insufficient/i.test(t))){calBusy=false;return calConsent(kind)}
+      if(r.status===403&&/not been used|disabled|accessNotConfigured/i.test(t))throw new Error('Google Calendar API が有効になっていません。Google Cloud で有効にしてください');
+      throw new Error('カレンダー登録に失敗しました ('+r.status+')');
+    }
+    const j=await r.json();
+    db.cal_events[kind]={date:n.next,time:n.time,event_id:j.id,updated_at:nowIso()};
+    changed();toast(NAME[kind]+'を'+fmtJ(n.next)+(n.time?' '+n.time:'')+'で登録しました');
+  }catch(e){toast(e.message,6000);console.warn(e)}
+  finally{calBusy=false}
 }
 function renderHome(m){
   const t=today();
   m.innerHTML=`<div class="hint" style="margin-bottom:10px">今日 ${fmtFull(t)}</div><div class="cards">`+['room','big'].map(k=>{
     const n=nextInfo(k);
     if(!n.last)return `<div class="card k-${k}"><h2>${NAME[k]}</h2><div class="hint">まだ記録がありません。</div><div class="acts"><button class="btn pri" data-do="${k}">やった</button></div></div>`;
-    const rem=diffDays(n.next,t),el=Math.max(0,Math.min(1,diffDays(t,n.last)/n.days));
+    const rem=diffDays(n.next,t),el=Math.max(0,Math.min(1,diffDays(t,n.last)/n.span));
     const big=rem>0?`あと${rem}日`:rem===0?'今日':`${-rem}日超過`;
     const cls=rem<0?'late':rem===0?'today':'';
-    return `<div class="card k-${k}"><h2>${NAME[k]}<small>${n.days}日ごと</small></h2>
+    const cal=db.cal_events[k],reg=cal&&cal.event_id&&cal.date===n.next&&(cal.time||'')===n.time;
+    return `<div class="card k-${k}"><h2>${NAME[k]}<small>${n.rule}</small></h2>
       <div class="big ${cls}">${big}</div><div class="bar2"><i style="width:${Math.round(el*100)}%"></i></div>
-      <div class="row">前回<b>${fmtJ(n.last)}</b></div>
-      <div class="row">次回<span><b>${fmtJ(n.next)}</b><span class="badge ${n.manual?'man':'auto'}">${n.manual?'手動':'自動'}</span></span></div>
-      <div class="acts"><button class="btn pri" data-do="${k}">やった</button><button class="btn" data-edit="${k}">次回日を直す</button><a class="btn" target="_blank" rel="noopener" href="${gcalUrl(k,n.next)}">カレンダーに登録</a></div></div>`;
+      <div class="row">前回<b>${fmtJ(n.last)}${evTime(k)}</b></div>
+      <div class="row">次回<span><b>${fmtJ(n.next)}${n.time?' '+n.time:''}</b><span class="badge ${n.manual?'man':'auto'}">${n.manual?'手動':'自動'}</span></span></div>
+      <div class="acts"><button class="btn pri" data-do="${k}">やった</button><button class="btn" data-edit="${k}">次回日を直す</button><button class="btn" data-cal="${k}">${reg?'カレンダー登録済み':'カレンダーに登録'}</button></div></div>`;
   }).join('')+`</div>`;
 }
 function renderHistory(m){
   const ev=liveEvents();
   m.innerHTML=`<div class="panel"><h2>履歴</h2><div class="acts" style="margin:0 0 8px"><button class="btn pri" data-do="room">部屋の掃除を記録</button><button class="btn" style="--k:var(--big)" data-do="big">大掃除を記録</button></div>
-  <div class="list">${ev.length?ev.map(e=>`<div class="it"><span class="d">${fmtFull(e.date)}</span><span class="tag k-${e.type}">${NAME[e.type]}</span><span class="m">${esc(e.memo)}</span><button class="btn sm" data-ed="${e.id}">編集</button></div>`).join(''):'<div class="empty">まだ記録がありません。</div>'}</div></div>`;
+  <div class="list">${ev.length?ev.map(e=>`<div class="it"><span class="d">${fmtFull(e.date)}${e.time?' '+e.time:''}</span><span class="tag k-${e.type}">${NAME[e.type]}</span><span class="m">${esc(e.memo)}</span><button class="btn sm" data-ed="${e.id}">編集</button></div>`).join(''):'<div class="empty">まだ記録がありません。</div>'}</div></div>`;
 }
 function renderCal(m){
   const [y,mo]=ui.month.split('-').map(Number);
@@ -295,17 +344,22 @@ function renderCal(m){
 function renderSettings(m){
   const c=db.config;
   m.innerHTML=`<div class="panel"><h2>周期</h2>
-  <div class="field"><span>部屋の掃除（日ごと）</span><input type="number" min="1" max="365" id="cr" value="${c.room_days}"></div>
-  <div class="field"><span>大掃除（日ごと）</span><input type="number" min="1" max="365" id="cb" value="${c.big_days}"></div>
+  <div class="field"><span>${NAME.room}（日ごと）</span><input type="number" min="1" max="365" id="cr" value="${c.room_days}"></div>
+  <div class="field"><span>${NAME.big}（毎月）</span><span style="display:flex;gap:6px"><select id="cn">${[1,2,3,4].map(i=>`<option value="${i}" ${c.big_nth===i?'selected':''}>第${i}</option>`).join('')}</select><select id="cw">${WD.map((w,i)=>`<option value="${i}" ${c.big_weekday===i?'selected':''}>${w}曜日</option>`).join('')}</select></span></div>
   <div class="field"><span>大掃除の日は部屋の掃除も済みにする</span><input type="checkbox" id="cc" ${c.big_counts_as_room?'checked':''}></div>
-  <p class="hint">次回日は「前回の日付＋周期」で自動計算します。ホームの「次回日を直す」で手動に変えられます。掃除を記録すると自動に戻ります。</p></div>
+  <p class="hint">${NAME.room}の次回日は「前回の日付＋周期」、${NAME.big}は「前回の翌月の第◯◯曜日」で自動計算します。ホームの「次回日を直す」で手動に変えられます。掃除を記録すると自動に戻ります。</p></div>
+  <div class="panel"><h2>時間</h2>
+  <div class="field"><span>${NAME.room}の時間</span><input type="time" id="tr" value="${c.room_time}"></div>
+  <div class="field"><span>${NAME.big}の時間</span><input type="time" id="tb" value="${c.big_time}"></div>
+  <div class="field"><span>カレンダー予定の長さ（分）</span><input type="number" min="5" max="600" step="5" id="cm" value="${c.cal_minutes}"></div>
+  <p class="hint">時間を入れると、カレンダーに時刻つきで登録します。空欄なら終日の予定です。掃除の記録や次回日を直すときに、1回ごとの時間も入力できます。</p></div>
   <div class="panel"><h2>☁ Google Drive 同期</h2>
   <p class="hint">記録を Drive の <code>${DRIVE_NAME}</code> に自動保存します（このアプリが作ったファイルだけにアクセスする権限）。スマホとPCで同じデータを使えます。</p>
   <div class="field"><span>Google OAuth クライアントID</span><input id="gcid" style="flex:1;min-width:0" value="${esc(settings.google_client_id)}"></div>
   <div class="acts"><button class="btn pri" id="gConnect">${settings.drive_linked?'今すぐ同期':'Driveに接続'}</button>${settings.drive_linked?'<button class="btn danger" id="gOff">連携を解除</button>':''}</div></div>
   <div class="panel"><h2>データ</h2><div class="acts" style="margin:0"><button class="btn" id="exp">JSONを書き出す</button><label class="btn">JSONを読み込む<input type="file" id="imp" accept=".json" hidden></label></div><p class="hint">バージョン ${VERSION}</p></div>`;
-  const save=()=>{db.config={...db.config,room_days:Math.max(1,+$('#cr').value||7),big_days:Math.max(1,+$('#cb').value||30),big_counts_as_room:$('#cc').checked,updated_at:nowIso()};changed()};
-  ['#cr','#cb','#cc'].forEach(s=>$(s).onchange=save);
+  const save=()=>{db.config={...db.config,room_days:Math.max(1,+$('#cr').value||7),big_nth:+$('#cn').value||1,big_weekday:+$('#cw').value,room_time:$('#tr').value,big_time:$('#tb').value,cal_minutes:Math.max(5,+$('#cm').value||60),big_counts_as_room:$('#cc').checked,updated_at:nowIso()};changed()};
+  ['#cr','#cn','#cw','#cc','#tr','#tb','#cm'].forEach(s=>$(s).onchange=save);
   $('#gConnect').onclick=async()=>{settings.google_client_id=$('#gcid').value.trim();saveSettings();if(await driveSync(true))toast('Driveと同期しました')};
   const off=$('#gOff');if(off)off.onclick=()=>{settings.drive_linked=false;saveSettings();gToken=null;driveFileId=null;setSync('off');renderSettings(m)};
   $('#exp').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(exportObj(),null,1)],{type:'application/json'}));a.download='hamster-db.json';a.click()};
@@ -322,32 +376,36 @@ function openModal(html,onSubmit){
 function closeModal(){$('#modal').classList.remove('on');$('#modal').innerHTML=''}
 $('#modal').onclick=e=>{if(e.target.id==='modal')closeModal()};
 function doDialog(kind,date){
-  openModal(`<h3>${NAME[kind]}を記録</h3><form class="mform"><label>やった日<input type="date" name="date" value="${date||today()}" required></label><label>メモ（任意）<input type="text" name="memo" placeholder="回し車を洗った"></label><div class="acts"><button type="button" class="btn" data-close>やめる</button><button class="btn pri k-${kind}" style="flex:1">記録する</button></div></form>`,
-  fd=>{addEvent(kind,fd.get('date'),fd.get('memo'));toast(NAME[kind]+'を記録しました')});
+  openModal(`<h3>${NAME[kind]}を記録</h3><form class="mform"><label>やった日<input type="date" name="date" value="${date||today()}" required></label><label>時間（任意）<input type="time" name="time" value="${db.config[kind+'_time']||''}"></label><label>メモ（任意）<input type="text" name="memo" placeholder="回し車を洗った"></label><div class="acts"><button type="button" class="btn" data-close>やめる</button><button class="btn pri k-${kind}" style="flex:1">記録する</button></div></form>`,
+  fd=>{addEvent(kind,fd.get('date'),fd.get('memo'),fd.get('time'));toast(NAME[kind]+'を記録しました')});
 }
 function editNextDialog(kind){
   const n=nextInfo(kind);
-  openModal(`<h3>${NAME[kind]}の次回日を直す</h3><form class="mform"><div class="hint">自動計算：${n.auto?fmtJ(n.auto):'—'}（前回${n.last?fmtJ(n.last):'—'}＋${n.days}日）</div><label>次回の日付<input type="date" name="date" value="${n.next||today()}" required></label><div class="hint">手動の日付が自動計算より優先されます。掃除を記録すると自動に戻ります。</div><div class="acts"><button type="button" class="btn" data-close>やめる</button><button type="submit" class="btn" value="auto">自動計算に戻す</button><button class="btn pri k-${kind}" value="save">保存</button></div></form>`,
-  (fd,v)=>{if(v==='auto')setOverride(kind,null);else setOverride(kind,fd.get('date'))});
+  openModal(`<h3>${NAME[kind]}の次回日を直す</h3><form class="mform"><div class="hint">自動計算：${n.auto?fmtJ(n.auto):'—'}（前回${n.last?fmtJ(n.last):'—'}／${n.rule}）</div><label>次回の日付<input type="date" name="date" value="${n.next||today()}" required></label><label>時間（任意）<input type="time" name="time" value="${n.time}"></label><div class="hint">手動の日付が自動計算より優先されます。掃除を記録すると自動に戻ります。</div><div class="acts"><button type="button" class="btn" data-close>やめる</button><button type="submit" class="btn" value="auto">自動計算に戻す</button><button class="btn pri k-${kind}" value="save">保存</button></div></form>`,
+  (fd,v)=>{if(v==='auto')setOverride(kind,null);else setOverride(kind,fd.get('date'),fd.get('time'))});
 }
 function editEventDialog(id){
   const e=db.events[id];if(!e)return;
-  openModal(`<h3>記録を編集</h3><form class="mform"><label>種類<select name="type"><option value="room" ${e.type==='room'?'selected':''}>部屋の掃除</option><option value="big" ${e.type==='big'?'selected':''}>大掃除</option></select></label><label>日付<input type="date" name="date" value="${e.date}" required></label><label>メモ<input type="text" name="memo" value="${esc(e.memo)}"></label><div class="acts"><button type="button" class="btn" data-close>やめる</button><button type="submit" class="btn danger" value="del">削除</button><button class="btn pri" value="save">保存</button></div></form>`,
+  openModal(`<h3>記録を編集</h3><form class="mform"><label>種類<select name="type"><option value="room" ${e.type==='room'?'selected':''}>部屋の掃除</option><option value="big" ${e.type==='big'?'selected':''}>大掃除</option></select></label><label>日付<input type="date" name="date" value="${e.date}" required></label><label>時間（任意）<input type="time" name="time" value="${e.time||''}"></label><label>メモ<input type="text" name="memo" value="${esc(e.memo)}"></label><div class="acts"><button type="button" class="btn" data-close>やめる</button><button type="submit" class="btn danger" value="del">削除</button><button class="btn pri" value="save">保存</button></div></form>`,
   (fd,v)=>{
     if(v==='del'){db.events[id]={...e,deleted:true,updated_at:nowIso()}}
-    else db.events[id]={...e,type:fd.get('type'),date:fd.get('date'),memo:fd.get('memo'),updated_at:nowIso()};
+    else db.events[id]={...e,type:fd.get('type'),date:fd.get('date'),time:fd.get('time')||'',memo:fd.get('memo'),updated_at:nowIso()};
     changed();
   });
 }
 document.addEventListener('click',e=>{
-  const b=e.target.closest('[data-do],[data-edit],[data-ed],.cal .c[data-date]');if(!b)return;
-  if(b.dataset.do)doDialog(b.dataset.do);
+  const b=e.target.closest('[data-do],[data-edit],[data-ed],[data-cal],.cal .c[data-date]');if(!b)return;
+  if(b.dataset.cal)registerCalendar(b.dataset.cal);
+  else if(b.dataset.do)doDialog(b.dataset.do);
   else if(b.dataset.edit)editNextDialog(b.dataset.edit);
   else if(b.dataset.ed)editEventDialog(b.dataset.ed);
   else if(b.dataset.date)doDialog('room',b.dataset.date);
 });
 
-setSync(syncState);render();gStartup();
+setSync(syncState);render();
+let pendingCal=null;try{pendingCal=sessionStorage.getItem('pending_cal');sessionStorage.removeItem('pending_cal')}catch(e){}
+gStartup();
+if(pendingCal&&gToken)registerCalendar(pendingCal);
 </script>
 </body>
 </html>
