@@ -123,7 +123,7 @@ if(!db){
 }
 db.config={...DEF_CFG,...db.config};db.cal_events=db.cal_events||{};
 const saveLocal=()=>lsSet(LS_DB,db);
-function changed(){saveLocal();scheduleSync();render()}
+function changed(){saveLocal();scheduleSync();render();if(typeof missionSoon==='function')missionSoon()}
 const uid=()=>'e'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
 
 function liveEvents(){return Object.values(db.events).filter(e=>!e.deleted).sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:(a.updated_at<b.updated_at?1:-1))}
@@ -268,6 +268,75 @@ async function registerCalendar(kind){
   }catch(e){toast(e.message,6000);console.warn(e)}
   finally{calBusy=false}
 }
+
+/* ---------- HOME✦MISSION 連携 ----------
+   次回の掃除日を HOME✦MISSION（kazoku-todo）の「1回だけ」のミッションとして登録し、家族のスマホに通知する。
+   HOME✦MISSION 側で「完了」されたら、こちらにも掃除の記録を自動で追加する。
+   接続先とカギは HOME✦MISSION の画面がこの端末に保存した localStorage 'kazoku.cfg'（同じサイトなので読める）を使う。
+   連携のオン/オフ・担当者・時刻は db.config.mission に入れて Drive で同期する。 */
+const MISSION_LS='hamsterdb.mission.v1';
+const missionCfg=()=>Object.assign({on:false,assignees:[],mode:'any',time:'09:00'},db.config.mission||{});
+const kazokuCfg=()=>{const c=lsGet('kazoku.cfg',{});return c&&c.api&&c.key?c:null};
+async function missionApi(path,opt={}){
+  const c=kazokuCfg();if(!c)throw new Error('HOME✦MISSION の接続情報がこの端末にありません');
+  const r=await fetch(c.api+path,{...opt,headers:{'Content-Type':'application/json','X-Family-Key':c.key,...(opt.headers||{})}});
+  if(!r.ok)throw new Error('HOME✦MISSION エラー ('+r.status+')');
+  return r.json();
+}
+const missionTaskId=k=>'ham-'+k;
+function missionTask(k){
+  const mc=missionCfg(),n=nextInfo(k);
+  if(!n.next)return null;
+  return {id:missionTaskId(k),title:'🐹 '+NAME[k],note:'ハムスター手帖から自動登録（'+n.rule+'）。完了するとハムスター手帖にも記録されます。',
+    checklist:[],assignees:mc.assignees,mode:mc.mode==='each'?'each':'any',
+    sched:{type:'once',date:n.next<today()?today():n.next,time:n.time||mc.time||'09:00'},snooze_min:30,max_renotify:2,done_label:'掃除した',active:true};
+}
+let missionBusy=false,missionT=null;
+function missionSoon(){clearTimeout(missionT);missionT=setTimeout(()=>missionPush().catch(e=>console.warn(e)),1500)}
+// 次回日が変わったときだけ送る（同じ内容なら送らない）
+async function missionPush(force){
+  if(missionBusy||!kazokuCfg())return;
+  const mc=missionCfg(),sent=lsGet(MISSION_LS,{});
+  missionBusy=true;
+  try{
+    for(const k of ['room','big']){
+      const id=missionTaskId(k);
+      if(!mc.on||!mc.assignees.length){
+        if(sent[k]){await missionApi('/api/tasks/'+id,{method:'DELETE'});delete sent[k];lsSet(MISSION_LS,sent)}
+        continue;
+      }
+      const t=missionTask(k);if(!t)continue;
+      const sig=JSON.stringify([t.sched,t.assignees,t.mode]);
+      if(!force&&sent[k]&&sent[k].sig===sig)continue;
+      await missionApi('/api/tasks',{method:'POST',body:JSON.stringify({task:t})});
+      sent[k]={sig,date:t.sched.date};lsSet(MISSION_LS,sent);
+    }
+  }finally{missionBusy=false}
+}
+// HOME✦MISSION で完了済みなら、こちらにも掃除の記録を追加する（登録中のミッションの日付を HOME✦MISSION から読む）
+async function missionPull(){
+  const mc=missionCfg();if(!mc.on||!kazokuCfg())return 0;
+  const t0=today();let added=0;
+  const st0=await missionApi('/api/state');
+  const due={};for(const k of ['room','big']){const t=(st0.tasks||[]).find(x=>x.id===missionTaskId(k));if(t&&t.sched&&t.sched.date&&t.sched.date<=t0)due[k]=t.sched.date}
+  for(const d of [...new Set(Object.values(due))]){
+    const st=d===st0.date?st0:await missionApi('/api/state?date='+d);
+    for(const k of ['room','big']){
+      if(due[k]!==d)continue;
+      const it=(st.day||[]).find(x=>x.task&&x.task.id===missionTaskId(k));
+      const done=it&&(it.targets||[]).filter(x=>x.done_at).sort((a,b)=>a.done_at-b.done_at)[0];
+      if(!done)continue;
+      const last=lastDone(k);if(last&&last>=d)continue;   // もう記録済み
+      const who=(st.members||[]).find(m=>m.id===done.done_by);
+      const tm=new Date(done.done_at);
+      addEvent(k,ymd(tm)<d?d:ymd(tm),'HOME✦MISSIONで完了'+(who?'（'+who.name+'）':''),pad(tm.getHours())+':'+pad(tm.getMinutes()));
+      added++;
+    }
+  }
+  if(added)toast('HOME✦MISSIONで完了した掃除を記録しました');
+  return added;
+}
+async function missionStartup(){try{await missionPull();await missionPush()}catch(e){console.warn(e)}}
 function renderHome(m){
   const t=today();
   m.innerHTML=`<div class="hint" style="margin-bottom:10px">今日 ${fmtFull(t)}</div><div class="cards">`+['room','big'].map(k=>{
@@ -319,6 +388,9 @@ function renderSettings(m){
   <div class="field"><span>${NAME.big}の時間</span><input type="time" id="tb" value="${c.big_time}"></div>
   <div class="field"><span>カレンダー予定の長さ（分）</span><input type="number" min="5" max="600" step="5" id="cm" value="${c.cal_minutes}"></div>
   <p class="hint">時間を入れると、カレンダーに時刻つきで登録します。空欄なら終日の予定です。掃除の記録や次回日を直すときに、1回ごとの時間も入力できます。</p></div>
+  <div class="panel"><h2>📣 HOME✦MISSION で通知</h2>
+  <p class="hint">次回の掃除日を HOME✦MISSION のミッションに自動で登録して、家族のスマホに通知します。HOME✦MISSION で「掃除した」を押すと、ここにも記録されます。</p>
+  <div id="msBox" class="hint">読み込み中…</div></div>
   <div class="panel"><h2>☁ Google Drive 同期</h2>
   <p class="hint">記録を Drive の <code>${DRIVE_NAME}</code> に自動保存します（このアプリが作ったファイルだけにアクセスする権限）。スマホとPCで同じデータを使えます。</p>
   <div class="field"><span>Google OAuth クライアントID</span><input id="gcid" style="flex:1;min-width:0" value="${esc(settings.google_client_id)}"></div>
@@ -326,10 +398,33 @@ function renderSettings(m){
   <div class="panel"><h2>データ</h2><div class="acts" style="margin:0"><button class="btn" id="exp">JSONを書き出す</button><label class="btn">JSONを読み込む<input type="file" id="imp" accept=".json" hidden></label></div><p class="hint">バージョン ${VERSION}</p></div>`;
   const save=()=>{db.config={...db.config,room_days:Math.max(1,+$('#cr').value||7),big_nth:+$('#cn').value||1,big_weekday:+$('#cw').value,room_time:$('#tr').value,big_time:$('#tb').value,cal_minutes:Math.max(5,+$('#cm').value||60),big_counts_as_room:$('#cc').checked,updated_at:nowIso()};changed()};
   ['#cr','#cn','#cw','#cc','#tr','#tb','#cm'].forEach(s=>$(s).onchange=save);
+  renderMissionBox();
   $('#gConnect').onclick=async()=>{settings.google_client_id=$('#gcid').value.trim();saveSettings();if(await driveSync(true))toast('Driveと同期しました')};
   const off=$('#gOff');if(off)off.onclick=()=>{settings.drive_linked=false;saveSettings();gToken=null;driveFileId=null;setSync('off');renderSettings(m)};
   $('#exp').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(exportObj(),null,1)],{type:'application/json'}));a.download='hamster-db.json';a.click()};
   $('#imp').onchange=async e=>{try{const j=JSON.parse(await e.target.files[0].text());db=mergeDb(db,j);changed();toast('読み込みました')}catch(x){toast('読み込めませんでした')}};
+}
+
+async function renderMissionBox(){
+  const box=$('#msBox');if(!box)return;
+  if(!kazokuCfg()){box.innerHTML='この端末で HOME✦MISSION を一度開くと（招待リンクから）、ここで設定できるようになります。<div class="acts"><a class="btn" href="../kazoku-todo/">HOME✦MISSION を開く</a></div>';return}
+  let members=[];
+  try{members=(await missionApi('/api/state')).members||[]}catch(e){box.textContent=e.message;return}
+  if(!$('#msBox'))return;
+  const mc=missionCfg();
+  box.className='';
+  box.innerHTML=`<div class="field"><span>通知する</span><input type="checkbox" id="msOn" ${mc.on?'checked':''}></div>
+  <div class="field"><span>担当</span><span style="display:flex;gap:10px;flex-wrap:wrap">${members.map(m=>`<label style="display:flex;gap:4px;align-items:center"><input type="checkbox" class="msM" value="${esc(m.id)}" ${mc.assignees.includes(m.id)?'checked':''}>${esc(m.emoji||'')}${esc(m.name)}</label>`).join('')}</span></div>
+  <div class="field"><span>完了の条件</span><select id="msMode"><option value="any" ${mc.mode!=='each'?'selected':''}>誰か1人でOK</option><option value="each" ${mc.mode==='each'?'selected':''}>全員</option></select></div>
+  <div class="field"><span>時間が空欄のときの通知時刻</span><input type="time" id="msTime" value="${esc(mc.time)}"></div>
+  <p class="hint">掃除の時間（上の「時間」）を入れてあればその時刻に、なければこの時刻に通知します。</p>`;
+  const save=()=>{const on=$('#msOn').checked,as=[...document.querySelectorAll('.msM:checked')].map(x=>x.value);
+    if(on&&!as.length){toast('担当を1人以上選んでください')}
+    db.config={...db.config,mission:{on,assignees:as,mode:$('#msMode').value,time:$('#msTime').value||'09:00'},updated_at:nowIso()};
+    saveLocal();scheduleSync();
+    missionPush().then(()=>toast(on&&as.length?'HOME✦MISSION に登録しました':'HOME✦MISSION の通知を止めました')).catch(e=>toast(e.message,5000));
+  };
+  box.querySelectorAll('input,select').forEach(x=>x.onchange=save);
 }
 
 /* ---------- ダイアログ ---------- */
@@ -372,6 +467,7 @@ setSync(syncState);render();
 let pendingCal=null;try{pendingCal=sessionStorage.getItem('pending_cal');sessionStorage.removeItem('pending_cal')}catch(e){}
 gStartup();
 if(pendingCal&&gToken)registerCalendar(pendingCal);
+missionStartup();
 </script>
 </body>
 </html>

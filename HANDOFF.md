@@ -18,3 +18,11 @@
 - トークンは同じオリジン（ykdtmnhnddsbba-jj.github.io）の localStorage `techo_gauth_tok` に共有で保存。どれか1つの手帖でログインすれば、他の手帖も認証画面なしで同期できる。
 - 同期は `GA.syncFile(ファイル名, id, マージ関数, 本文関数)`。Drive の読み込みに失敗したら上書きせずに中止する（データ消失防止）。ファイルが404なら id を忘れて次回検索し直す。
 - portal の lib が読めない時もページ自体は表示される（同期だけ無効）。
+
+## HOME✦MISSION 連携（2026-11）
+- 設定タブ「📣 HOME✦MISSION で通知」。次回の掃除日を kazoku-todo の「1回だけ」ミッション（id `ham-room` / `ham-big`）として登録・更新する。
+- 接続先とカギは HOME✦MISSION がこの端末に保存した localStorage `kazoku.cfg`（{api,key}）を読む（同じ github.io なので読める）。この端末で HOME✦MISSION を一度開いていないと設定できない。
+- オン/オフ・担当・完了の条件・既定の時刻は `db.config.mission` に入れて Drive で同期。何を送ったかは端末ごとに `hamsterdb.mission.v1` に覚えて、同じ内容は送り直さない。
+- 次回日が過ぎていたら「今日」で登録する（過去の日付だと通知されないため）。
+- 起動時に HOME✦MISSION のミッション日付を読み、そこで完了されていれば「HOME✦MISSIONで完了（名前）」として掃除の記録を追加する（前回の記録がその日以降なら追加しない）。
+- オフにすると2つのミッションを削除する。
